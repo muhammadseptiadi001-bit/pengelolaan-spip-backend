@@ -122,6 +122,8 @@ async function kirimNotifikasiJatuhTempo() {
 cron.schedule('0 8 * * *', () => {
   console.log("Menjalankan pengecekan notifikasi terjadwal...")
   kirimNotifikasiJatuhTempo()
+}, {
+  timezone: "Asia/Jakarta"
 })
 
 app.post('/api/kirim-notifikasi', async (req, res) => {
