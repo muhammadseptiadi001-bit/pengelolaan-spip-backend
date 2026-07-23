@@ -55,6 +55,26 @@ async function setupDatabase() {
 }
 setupDatabase()
 
+// ===== MIDDLEWARE AUTENTIKASI =====
+
+function verifikasiToken(req, res, next) {
+  const authHeader = req.headers.authorization
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Akses ditolak. Silakan login terlebih dahulu." })
+  }
+
+  const token = authHeader.split(" ")[1]
+
+  try {
+    const decoded = jwt.verify(token, SECRET_KEY)
+    req.user = decoded
+    next()
+  } catch (err) {
+    return res.status(401).json({ error: "Sesi login tidak valid atau sudah kedaluwarsa. Silakan login ulang." })
+  }
+}
+
 // ===== EMAIL SETUP =====
 
 const transporter = nodemailer.createTransport({
@@ -126,7 +146,7 @@ cron.schedule('0 8 * * *', () => {
   timezone: "Asia/Jakarta"
 })
 
-app.post('/api/kirim-notifikasi', async (req, res) => {
+app.post('/api/kirim-notifikasi', verifikasiToken, async (req, res) => {
   try {
     const hasil = await kirimNotifikasiJatuhTempo()
     res.json(hasil)
@@ -186,9 +206,9 @@ app.post('/api/login', async (req, res) => {
   }
 })
 
-// ===== UNIT SPIP =====
+// ===== UNIT SPIP (semua endpoint di bawah ini wajib login) =====
 
-app.get('/api/unit', async (req, res) => {
+app.get('/api/unit', verifikasiToken, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM unit')
     res.json(rows)
@@ -198,7 +218,7 @@ app.get('/api/unit', async (req, res) => {
   }
 })
 
-app.post('/api/unit', async (req, res) => {
+app.post('/api/unit', verifikasiToken, async (req, res) => {
   const {
     namaPerusahaan, jenisSpip, namaUnit, jenisAlat, nomorUnit,
     tanggalUjiTerakhir, jangkaWaktuBulan, statusKelayakan, temuan, tindakLanjut, foto,
@@ -223,7 +243,7 @@ app.post('/api/unit', async (req, res) => {
   }
 })
 
-app.put('/api/unit/:id', async (req, res) => {
+app.put('/api/unit/:id', verifikasiToken, async (req, res) => {
   const id = Number(req.params.id)
   const { statusKelayakan, tindakLanjut } = req.body
 
@@ -239,7 +259,7 @@ app.put('/api/unit/:id', async (req, res) => {
   }
 })
 
-app.delete('/api/unit/:id', async (req, res) => {
+app.delete('/api/unit/:id', verifikasiToken, async (req, res) => {
   const id = Number(req.params.id)
   try {
     await pool.query('DELETE FROM unit WHERE id = $1', [id])
