@@ -7,6 +7,9 @@ const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
 const nodemailer = require('nodemailer')
 const cron = require('node-cron')
+const multer = require('multer')
+const streamifier = require('streamifier')
+const cloudinary = require('cloudinary').v2
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -19,6 +22,29 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 })
+
+// ===== CLOUDINARY SETUP =====
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+})
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 }, // maksimal 15MB per file
+})
+
+function uploadBufferKeCloudinary(buffer, opsi) {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(opsi, (error, result) => {
+      if (error) return reject(error)
+      resolve(result)
+    })
+    streamifier.createReadStream(buffer).pipe(uploadStream)
+  })
+}
 
 async function setupDatabase() {
   await pool.query(`
@@ -283,6 +309,33 @@ app.get('/api/riwayat/unit/:id', verifikasiToken, async (req, res) => {
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: "Gagal mengambil riwayat unit: " + err.message })
+  }
+})
+
+// ===== UPLOAD FILE KE CLOUDINARY (BARU) =====
+
+app.post('/api/upload', verifikasiToken, upload.single('file'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: "Tidak ada file yang dikirim." })
+  }
+
+  const tipe = req.body.tipe === 'pdf' ? 'pdf' : 'foto'
+
+  try {
+    const opsi = {
+      folder: 'spip',
+      resource_type: tipe === 'pdf' ? 'raw' : 'image',
+    }
+
+    const hasil = await uploadBufferKeCloudinary(req.file.buffer, opsi)
+
+    res.json({
+      url: hasil.secure_url,
+      namaAsli: req.file.originalname,
+    })
+  } catch (err) {
+    console.error("Gagal upload ke Cloudinary:", err)
+    res.status(500).json({ error: "Gagal mengupload file: " + err.message })
   }
 })
 
