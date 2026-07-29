@@ -391,10 +391,99 @@ app.post('/api/login', async (req, res) => {
 
 // ===== UNIT SPIP (semua endpoint di bawah ini wajib login) =====
 
+// GET /api/unit — sekarang mendukung filter, pagination, dan mode "semua" (untuk export Excel)
+// Query params yang didukung:
+//   halaman, batas         -> untuk pagination (diabaikan kalau semua=true)
+//   perusahaan, namaUnit, nomorUnit  -> pencarian teks (ILIKE, contains)
+//   jenisSpip, jenisAlat, statusKelayakan, statusWaktu -> exact match ("Semua" = tanpa filter)
+//   semua=true              -> kembalikan SEMUA baris yang cocok filter, tanpa LIMIT/OFFSET (dipakai saat export Excel)
 app.get('/api/unit', verifikasiToken, async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM unit')
-    res.json(rows)
+    const {
+      perusahaan = "",
+      jenisSpip = "Semua",
+      namaUnit = "",
+      jenisAlat = "Semua",
+      nomorUnit = "",
+      statusKelayakan = "Semua",
+      statusWaktu = "Semua",
+      semua = "false",
+    } = req.query
+
+    const kondisi = []
+    const nilai = []
+    let idx = 1
+
+    if (perusahaan) {
+      kondisi.push(`"namaPerusahaan" ILIKE $${idx++}`)
+      nilai.push(`%${perusahaan}%`)
+    }
+    if (jenisSpip !== "Semua") {
+      kondisi.push(`"jenisSpip" = $${idx++}`)
+      nilai.push(jenisSpip)
+    }
+    if (namaUnit) {
+      kondisi.push(`"namaUnit" ILIKE $${idx++}`)
+      nilai.push(`%${namaUnit}%`)
+    }
+    if (jenisAlat !== "Semua") {
+      kondisi.push(`"jenisAlat" = $${idx++}`)
+      nilai.push(jenisAlat)
+    }
+    if (nomorUnit) {
+      kondisi.push(`"nomorUnit" ILIKE $${idx++}`)
+      nilai.push(`%${nomorUnit}%`)
+    }
+    if (statusKelayakan !== "Semua") {
+      kondisi.push(`"statusKelayakan" = $${idx++}`)
+      nilai.push(statusKelayakan)
+    }
+    // statusWaktu dihitung dari jatuh_tempo (kolom turunan di subquery di bawah),
+    // meniru logika hitungStatusWaktu() di src/utils/spipHelpers.js
+    if (statusWaktu === "Sudah Lewat") {
+      kondisi.push(`jatuh_tempo < NOW()`)
+    } else if (statusWaktu === "Mendekati Jatuh Tempo") {
+      kondisi.push(`jatuh_tempo >= NOW() AND jatuh_tempo <= NOW() + INTERVAL '30 days'`)
+    } else if (statusWaktu === "Aman") {
+      kondisi.push(`jatuh_tempo > NOW() + INTERVAL '30 days'`)
+    }
+
+    const whereClause = kondisi.length > 0 ? `WHERE ${kondisi.join(' AND ')}` : ""
+
+    const queryDasar = `
+      FROM (
+        SELECT *,
+          "tanggalUjiTerakhir"::timestamp + ("jangkaWaktuBulan" * INTERVAL '1 month') AS jatuh_tempo
+        FROM unit
+      ) unit_dengan_tempo
+      ${whereClause}
+    `
+
+    // Mode export: kembalikan semua baris yang cocok filter, tanpa pagination
+    if (semua === "true") {
+      const queryData = `SELECT * ${queryDasar} ORDER BY id DESC`
+      const { rows } = await pool.query(queryData, nilai)
+      return res.json({ data: rows, totalData: rows.length })
+    }
+
+    // Mode normal: pagination di database
+    const halaman = Math.max(1, Number(req.query.halaman) || 1)
+    const batas = Math.max(1, Number(req.query.batas) || 10)
+    const offset = (halaman - 1) * batas
+
+    const queryData = `SELECT * ${queryDasar} ORDER BY id DESC LIMIT $${idx++} OFFSET $${idx++}`
+    const queryHitung = `SELECT COUNT(*)::int AS total ${queryDasar}`
+    const nilaiData = [...nilai, batas, offset]
+
+    const [hasilData, hasilHitung] = await Promise.all([
+      pool.query(queryData, nilaiData),
+      pool.query(queryHitung, nilai),
+    ])
+
+    const totalData = hasilHitung.rows[0].total
+    const totalHalaman = Math.max(1, Math.ceil(totalData / batas))
+
+    res.json({ data: hasilData.rows, totalData, totalHalaman, halaman })
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: "Gagal mengambil data: " + err.message })
