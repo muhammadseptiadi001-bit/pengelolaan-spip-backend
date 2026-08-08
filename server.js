@@ -90,6 +90,17 @@ async function setupDatabase() {
     )
   `)
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pengaturan_perusahaan (
+      id INTEGER PRIMARY KEY DEFAULT 1,
+      "prosedurPengujianKelayakan" BOOLEAN DEFAULT false,
+      "prosedurPemantauanEvaluasi" BOOLEAN DEFAULT false,
+      "diubahOleh" TEXT,
+      "diubahPada" TIMESTAMP DEFAULT NOW(),
+      CONSTRAINT satu_baris_saja CHECK (id = 1)
+    )
+  `)
+
   console.log("Database siap.")
 }
 setupDatabase()
@@ -309,6 +320,47 @@ app.get('/api/riwayat/unit/:id', verifikasiToken, async (req, res) => {
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: "Gagal mengambil riwayat unit: " + err.message })
+  }
+})
+
+// ===== PENGATURAN TINGKAT PERUSAHAAN (checklist kepatuhan di halaman Evaluasi) =====
+
+app.get('/api/pengaturan-perusahaan', verifikasiToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM pengaturan_perusahaan WHERE id = 1')
+    if (rows.length === 0) {
+      const { rows: rowsBaru } = await pool.query(
+        `INSERT INTO pengaturan_perusahaan (id, "prosedurPengujianKelayakan", "prosedurPemantauanEvaluasi")
+         VALUES (1, false, false) RETURNING *`
+      )
+      return res.json(rowsBaru[0])
+    }
+    res.json(rows[0])
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal mengambil pengaturan perusahaan: " + err.message })
+  }
+})
+
+app.put('/api/pengaturan-perusahaan', verifikasiToken, async (req, res) => {
+  const { prosedurPengujianKelayakan, prosedurPemantauanEvaluasi } = req.body
+
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO pengaturan_perusahaan (id, "prosedurPengujianKelayakan", "prosedurPemantauanEvaluasi", "diubahOleh", "diubahPada")
+       VALUES (1, $1, $2, $3, NOW())
+       ON CONFLICT (id) DO UPDATE SET
+         "prosedurPengujianKelayakan" = $1,
+         "prosedurPemantauanEvaluasi" = $2,
+         "diubahOleh" = $3,
+         "diubahPada" = NOW()
+       RETURNING *`,
+      [!!prosedurPengujianKelayakan, !!prosedurPemantauanEvaluasi, req.user.nama]
+    )
+    res.json(rows[0])
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal menyimpan pengaturan perusahaan: " + err.message })
   }
 })
 
