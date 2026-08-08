@@ -68,6 +68,8 @@ async function setupDatabase() {
       "tanggalUjiTerakhir" TEXT,
       "jangkaWaktuBulan" INTEGER,
       "statusKelayakan" TEXT,
+      "namaPetugas" TEXT,
+      "statusKompetensi" TEXT,
       temuan TEXT,
       "tindakLanjut" TEXT,
       foto TEXT,
@@ -76,6 +78,12 @@ async function setupDatabase() {
       "dibuatOleh" TEXT
     )
   `)
+
+  // Migrasi kolom baru untuk database yang tabel "unit"-nya sudah dibuat sebelum
+  // fitur Nama Petugas & Status Kompetensi ada. CREATE TABLE IF NOT EXISTS di atas
+  // tidak akan menambah kolom ke tabel yang sudah ada, jadi ditambahkan manual di sini.
+  await pool.query(`ALTER TABLE unit ADD COLUMN IF NOT EXISTS "namaPetugas" TEXT`)
+  await pool.query(`ALTER TABLE unit ADD COLUMN IF NOT EXISTS "statusKompetensi" TEXT`)
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS riwayat_status (
@@ -545,20 +553,20 @@ app.get('/api/unit', verifikasiToken, async (req, res) => {
 app.post('/api/unit', verifikasiToken, async (req, res) => {
   const {
     namaPerusahaan, jenisSpip, namaUnit, jenisAlat, nomorUnit,
-    tanggalUjiTerakhir, jangkaWaktuBulan, statusKelayakan, temuan, tindakLanjut, foto,
-    pdfNama, pdfData, dibuatOleh
+    tanggalUjiTerakhir, jangkaWaktuBulan, statusKelayakan, namaPetugas, statusKompetensi,
+    temuan, tindakLanjut, foto, pdfNama, pdfData, dibuatOleh
   } = req.body
 
   try {
     const { rows } = await pool.query(
       `INSERT INTO unit (
         "namaPerusahaan", "jenisSpip", "namaUnit", "jenisAlat", "nomorUnit",
-        "tanggalUjiTerakhir", "jangkaWaktuBulan", "statusKelayakan", temuan, "tindakLanjut", foto,
-        "pdfNama", "pdfData", "dibuatOleh"
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+        "tanggalUjiTerakhir", "jangkaWaktuBulan", "statusKelayakan", "namaPetugas", "statusKompetensi",
+        temuan, "tindakLanjut", foto, "pdfNama", "pdfData", "dibuatOleh"
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
       [namaPerusahaan, jenisSpip, namaUnit, jenisAlat, nomorUnit,
-        tanggalUjiTerakhir, jangkaWaktuBulan, statusKelayakan, temuan, tindakLanjut, foto,
-        pdfNama, pdfData, dibuatOleh]
+        tanggalUjiTerakhir, jangkaWaktuBulan, statusKelayakan, namaPetugas, statusKompetensi,
+        temuan, tindakLanjut, foto, pdfNama, pdfData, dibuatOleh]
     )
     res.json(rows[0])
   } catch (err) {
@@ -627,17 +635,19 @@ app.post('/api/unit/import', verifikasiToken, async (req, res) => {
   })
 })
 
+// PUT /api/unit/:id — sekarang juga menerima namaPetugas & statusKompetensi supaya bisa
+// di-follow-up langsung dari tabel Data SPIP tanpa harus input ulang unit dari awal.
 app.put('/api/unit/:id', verifikasiToken, async (req, res) => {
   const id = Number(req.params.id)
-  const { statusKelayakan, tindakLanjut } = req.body
+  const { statusKelayakan, tindakLanjut, namaPetugas, statusKompetensi } = req.body
 
   try {
     const { rows: rowsLama } = await pool.query('SELECT * FROM unit WHERE id = $1', [id])
     const unitLama = rowsLama[0]
 
     const { rows } = await pool.query(
-      'UPDATE unit SET "statusKelayakan" = $1, "tindakLanjut" = $2 WHERE id = $3 RETURNING *',
-      [statusKelayakan, tindakLanjut, id]
+      'UPDATE unit SET "statusKelayakan" = $1, "tindakLanjut" = $2, "namaPetugas" = $3, "statusKompetensi" = $4 WHERE id = $5 RETURNING *',
+      [statusKelayakan, tindakLanjut, namaPetugas, statusKompetensi, id]
     )
 
     if (unitLama && unitLama.statusKelayakan !== statusKelayakan) {
