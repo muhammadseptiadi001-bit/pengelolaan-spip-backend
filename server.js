@@ -128,6 +128,48 @@ async function setupDatabase() {
     )
   `)
 
+  // ===== TABEL BARU untuk Aspek 2 — Pengamanan Instalasi (4.4.2) =====
+  // Tabel terpisah dari "pengaturan_perusahaan" (bukan nambah kolom ke situ), supaya
+  // endpoint /api/pengaturan-perusahaan yang sudah dipakai halaman Evaluasi tidak
+  // ikut berubah bentuk. Poin 2-7 dari kriteria Kepmen 4.4.2 (identifikasi kebutuhan
+  // pengaman, prosedur pengamanan, desain, prosedur pemasangan, prosedur pemeliharaan
+  // pengamanan, program & jadwal pemeriksaan) masing-masing jadi satu kolom boolean.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pengaturan_pengamanan_instalasi (
+      id INTEGER PRIMARY KEY DEFAULT 1,
+      "identifikasiKebutuhanPengaman" BOOLEAN DEFAULT false,
+      "prosedurPengamananInstalasi" BOOLEAN DEFAULT false,
+      "desainPengamananInstalasi" BOOLEAN DEFAULT false,
+      "prosedurPemasanganInstalasi" BOOLEAN DEFAULT false,
+      "prosedurPemeliharaanPengamanan" BOOLEAN DEFAULT false,
+      "programJadwalPemeriksaan" BOOLEAN DEFAULT false,
+      "diubahOleh" TEXT,
+      "diubahPada" TIMESTAMP DEFAULT NOW(),
+      CONSTRAINT satu_baris_saja_pengamanan CHECK (id = 1)
+    )
+  `)
+
+  // Poin 8 dari kriteria 4.4.2 ("menerapkan, melaksanakan pemeriksaan berkala, memantau,
+  // dan mengevaluasi sistem pengamanan instalasi oleh Tenaga Teknis Berkompeten") — sifatnya
+  // per-instalasi, satu instalasi bisa punya banyak riwayat pemeriksaan. Polanya sama
+  // persis dengan tabel "pemeliharaan" di atas.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pemeriksaan_instalasi (
+      id SERIAL PRIMARY KEY,
+      "unitId" INTEGER,
+      "namaUnit" TEXT,
+      "nomorUnit" TEXT,
+      "tanggalPemeriksaan" TEXT,
+      hasil TEXT,
+      temuan TEXT,
+      petugas TEXT,
+      "statusKompetensi" TEXT,
+      "jadwalBerikutnya" TEXT,
+      "dibuatOleh" TEXT,
+      "dibuatPada" TIMESTAMP DEFAULT NOW()
+    )
+  `)
+
   console.log("Database siap.")
 }
 setupDatabase()
@@ -391,6 +433,111 @@ app.put('/api/pengaturan-perusahaan', verifikasiToken, async (req, res) => {
   }
 })
 
+// ===== PENGATURAN PENGAMANAN INSTALASI (Aspek 2 — 4.4.2, poin 2-7) =====
+
+app.get('/api/pengaturan-pengamanan-instalasi', verifikasiToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM pengaturan_pengamanan_instalasi WHERE id = 1')
+    if (rows.length === 0) {
+      const { rows: rowsBaru } = await pool.query(
+        `INSERT INTO pengaturan_pengamanan_instalasi (
+          id, "identifikasiKebutuhanPengaman", "prosedurPengamananInstalasi", "desainPengamananInstalasi",
+          "prosedurPemasanganInstalasi", "prosedurPemeliharaanPengamanan", "programJadwalPemeriksaan"
+        ) VALUES (1, false, false, false, false, false, false) RETURNING *`
+      )
+      return res.json(rowsBaru[0])
+    }
+    res.json(rows[0])
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal mengambil pengaturan pengamanan instalasi: " + err.message })
+  }
+})
+
+app.put('/api/pengaturan-pengamanan-instalasi', verifikasiToken, async (req, res) => {
+  const {
+    identifikasiKebutuhanPengaman, prosedurPengamananInstalasi, desainPengamananInstalasi,
+    prosedurPemasanganInstalasi, prosedurPemeliharaanPengamanan, programJadwalPemeriksaan
+  } = req.body
+
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO pengaturan_pengamanan_instalasi (
+        id, "identifikasiKebutuhanPengaman", "prosedurPengamananInstalasi", "desainPengamananInstalasi",
+        "prosedurPemasanganInstalasi", "prosedurPemeliharaanPengamanan", "programJadwalPemeriksaan",
+        "diubahOleh", "diubahPada"
+      ) VALUES (1, $1, $2, $3, $4, $5, $6, $7, NOW())
+      ON CONFLICT (id) DO UPDATE SET
+        "identifikasiKebutuhanPengaman" = $1,
+        "prosedurPengamananInstalasi" = $2,
+        "desainPengamananInstalasi" = $3,
+        "prosedurPemasanganInstalasi" = $4,
+        "prosedurPemeliharaanPengamanan" = $5,
+        "programJadwalPemeriksaan" = $6,
+        "diubahOleh" = $7,
+        "diubahPada" = NOW()
+      RETURNING *`,
+      [
+        !!identifikasiKebutuhanPengaman, !!prosedurPengamananInstalasi, !!desainPengamananInstalasi,
+        !!prosedurPemasanganInstalasi, !!prosedurPemeliharaanPengamanan, !!programJadwalPemeriksaan,
+        req.user.nama
+      ]
+    )
+    res.json(rows[0])
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal menyimpan pengaturan pengamanan instalasi: " + err.message })
+  }
+})
+
+// ===== PEMERIKSAAN INSTALASI (Aspek 2 — 4.4.2, poin 8) =====
+
+app.get('/api/pemeriksaan-instalasi', verifikasiToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM pemeriksaan_instalasi ORDER BY id DESC')
+    res.json(rows)
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal mengambil data pemeriksaan instalasi: " + err.message })
+  }
+})
+
+app.post('/api/pemeriksaan-instalasi', verifikasiToken, async (req, res) => {
+  const {
+    unitId, namaUnit, nomorUnit, tanggalPemeriksaan,
+    hasil, temuan, petugas, statusKompetensi, jadwalBerikutnya
+  } = req.body
+
+  if (!unitId || !namaUnit || !nomorUnit || !tanggalPemeriksaan || !hasil) {
+    return res.status(400).json({ error: "Unit, Tanggal Pemeriksaan, dan Hasil Pemeriksaan wajib diisi." })
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO pemeriksaan_instalasi (
+        "unitId", "namaUnit", "nomorUnit", "tanggalPemeriksaan",
+        hasil, temuan, petugas, "statusKompetensi", "jadwalBerikutnya", "dibuatOleh"
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [unitId, namaUnit, nomorUnit, tanggalPemeriksaan, hasil, temuan || "", petugas || "", statusKompetensi || "", jadwalBerikutnya || null, req.user.nama]
+    )
+    res.json(rows[0])
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal menyimpan pemeriksaan instalasi: " + err.message })
+  }
+})
+
+app.delete('/api/pemeriksaan-instalasi/:id', verifikasiToken, async (req, res) => {
+  const id = Number(req.params.id)
+  try {
+    await pool.query('DELETE FROM pemeriksaan_instalasi WHERE id = $1', [id])
+    res.json({ message: "Berhasil dihapus" })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal menghapus pemeriksaan instalasi: " + err.message })
+  }
+})
+
 // ===== PEMELIHARAAN (Aspek 1 — Sistem & Pelaksanaan Pemeliharaan SPIP) =====
 
 app.get('/api/pemeliharaan', verifikasiToken, async (req, res) => {
@@ -518,12 +665,6 @@ app.post('/api/login', async (req, res) => {
 
 // ===== UNIT SPIP (semua endpoint di bawah ini wajib login) =====
 
-// GET /api/unit — sekarang mendukung filter, pagination, dan mode "semua" (untuk export Excel)
-// Query params yang didukung:
-//   halaman, batas         -> untuk pagination (diabaikan kalau semua=true)
-//   perusahaan, namaUnit, nomorUnit  -> pencarian teks (ILIKE, contains)
-//   jenisSpip, jenisAlat, statusKelayakan, statusWaktu -> exact match ("Semua" = tanpa filter)
-//   semua=true              -> kembalikan SEMUA baris yang cocok filter, tanpa LIMIT/OFFSET (dipakai saat export Excel)
 app.get('/api/unit', verifikasiToken, async (req, res) => {
   try {
     const {
@@ -565,8 +706,6 @@ app.get('/api/unit', verifikasiToken, async (req, res) => {
       kondisi.push(`"statusKelayakan" = $${idx++}`)
       nilai.push(statusKelayakan)
     }
-    // statusWaktu dihitung dari jatuh_tempo (kolom turunan di subquery di bawah),
-    // meniru logika hitungStatusWaktu() di src/utils/spipHelpers.js
     if (statusWaktu === "Sudah Lewat") {
       kondisi.push(`jatuh_tempo < NOW()`)
     } else if (statusWaktu === "Mendekati Jatuh Tempo") {
@@ -586,14 +725,12 @@ app.get('/api/unit', verifikasiToken, async (req, res) => {
       ${whereClause}
     `
 
-    // Mode export: kembalikan semua baris yang cocok filter, tanpa pagination
     if (semua === "true") {
       const queryData = `SELECT * ${queryDasar} ORDER BY id DESC`
       const { rows } = await pool.query(queryData, nilai)
       return res.json({ data: rows, totalData: rows.length })
     }
 
-    // Mode normal: pagination di database
     const halaman = Math.max(1, Number(req.query.halaman) || 1)
     const batas = Math.max(1, Number(req.query.batas) || 10)
     const offset = (halaman - 1) * batas
@@ -702,8 +839,6 @@ app.post('/api/unit/import', verifikasiToken, async (req, res) => {
   })
 })
 
-// PUT /api/unit/:id — sekarang juga menerima namaPetugas & statusKompetensi supaya bisa
-// di-follow-up langsung dari tabel Data SPIP tanpa harus input ulang unit dari awal.
 app.put('/api/unit/:id', verifikasiToken, async (req, res) => {
   const id = Number(req.params.id)
   const { statusKelayakan, tindakLanjut, namaPetugas, statusKompetensi } = req.body
