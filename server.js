@@ -79,9 +79,6 @@ async function setupDatabase() {
     )
   `)
 
-  // Migrasi kolom baru untuk database yang tabel "unit"-nya sudah dibuat sebelum
-  // fitur Nama Petugas & Status Kompetensi ada. CREATE TABLE IF NOT EXISTS di atas
-  // tidak akan menambah kolom ke tabel yang sudah ada, jadi ditambahkan manual di sini.
   await pool.query(`ALTER TABLE unit ADD COLUMN IF NOT EXISTS "namaPetugas" TEXT`)
   await pool.query(`ALTER TABLE unit ADD COLUMN IF NOT EXISTS "statusKompetensi" TEXT`)
 
@@ -109,8 +106,6 @@ async function setupDatabase() {
     )
   `)
 
-  // Tabel Pemeliharaan (Aspek 1). Satu unit bisa punya banyak baris riwayat
-  // pemeliharaan — "jadwalBerikutnya" bersifat opsional (boleh NULL).
   await pool.query(`
     CREATE TABLE IF NOT EXISTS pemeliharaan (
       id SERIAL PRIMARY KEY,
@@ -127,7 +122,6 @@ async function setupDatabase() {
     )
   `)
 
-  // ===== Aspek 2 — Pengamanan Instalasi (4.4.2) =====
   await pool.query(`
     CREATE TABLE IF NOT EXISTS pengaturan_pengamanan_instalasi (
       id INTEGER PRIMARY KEY DEFAULT 1,
@@ -160,15 +154,11 @@ async function setupDatabase() {
     )
   `)
 
-  // ===== TABEL BARU — Aspek 4: Kompetensi Tenaga Teknik (4.4.4) =====
-  // Datanya BERDIRI SENDIRI, tidak berasal dari Input SPIP — mencatat seluruh tenaga
-  // teknik perusahaan beserta sertifikasi kompetensinya. "masaBerlakuSertifikat" adalah
-  // tanggal kedaluwarsa langsung (bukan durasi), status Aktif/Akan Kedaluwarsa/Kedaluwarsa
-  // dihitung di frontend dari tanggal ini (pola sama seperti "jadwalBerikutnya" di Pemeliharaan).
   await pool.query(`
     CREATE TABLE IF NOT EXISTS tenaga_teknik (
       id SERIAL PRIMARY KEY,
       nama TEXT,
+      "namaPerusahaan" TEXT,
       "idKaryawan" TEXT,
       jabatan TEXT,
       departemen TEXT,
@@ -179,6 +169,43 @@ async function setupDatabase() {
       "masaBerlakuSertifikat" TEXT,
       "cakupanKompetensi" TEXT,
       "berkasSertifikat" TEXT,
+      "dibuatOleh" TEXT,
+      "dibuatPada" TIMESTAMP DEFAULT NOW()
+    )
+  `)
+
+  await pool.query(`ALTER TABLE tenaga_teknik ADD COLUMN IF NOT EXISTS "namaPerusahaan" TEXT`)
+
+  // ===== TABEL BARU — Aspek 5: Evaluasi Laporan Hasil Kajian Teknis (4.4.5) =====
+  // Poin 1 dari kriteria regulasi (prosedur evaluasi kajian teknis sudah disusun &
+  // ditetapkan) bersifat tingkat perusahaan — pola sama seperti pengaturan_perusahaan
+  // dan pengaturan_pengamanan_instalasi (satu baris, id selalu 1).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pengaturan_evaluasi_kajian (
+      id INTEGER PRIMARY KEY DEFAULT 1,
+      "prosedurEvaluasiKajianTeknis" BOOLEAN DEFAULT false,
+      "diubahOleh" TEXT,
+      "diubahPada" TIMESTAMP DEFAULT NOW(),
+      CONSTRAINT satu_baris_saja_kajian CHECK (id = 1)
+    )
+  `)
+
+  // Poin 2-4 dari kriteria regulasi bersifat per dokumen kajian teknis — satu baris per
+  // laporan kajian yang dibuat perusahaan.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS kajian_teknis (
+      id SERIAL PRIMARY KEY,
+      "judulKajian" TEXT,
+      "jenisKajian" TEXT,
+      "keteranganPerubahan" TEXT,
+      penyusun TEXT,
+      "tanggalKajian" TEXT,
+      "fileLaporan" TEXT,
+      "statusKememadaian" TEXT,
+      "disampaikanKeKait" BOOLEAN DEFAULT false,
+      "tanggalPenyampaian" TEXT,
+      "namaPenerima" TEXT,
+      "catatanEvaluasi" TEXT,
       "dibuatOleh" TEXT,
       "dibuatPada" TIMESTAMP DEFAULT NOW()
     )
@@ -614,9 +641,8 @@ app.get('/api/tenaga-teknik', verifikasiToken, async (req, res) => {
 
 app.post('/api/tenaga-teknik', verifikasiToken, async (req, res) => {
   const {
-    nama, idKaryawan, jabatan, departemen, kompetensi, noSertifikat,
-    instansiPenerbit, tanggalTerbitSertifikat, masaBerlakuSertifikat,
-    cakupanKompetensi, berkasSertifikat
+    nama, namaPerusahaan, idKaryawan, jabatan, departemen, kompetensi, noSertifikat,
+    instansiPenerbit, tanggalTerbitSertifikat, masaBerlakuSertifikat, berkasSertifikat
   } = req.body
 
   if (!nama || !idKaryawan || !jabatan || !kompetensi || !noSertifikat) {
@@ -626,14 +652,13 @@ app.post('/api/tenaga-teknik', verifikasiToken, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `INSERT INTO tenaga_teknik (
-        nama, "idKaryawan", jabatan, departemen, kompetensi, "noSertifikat",
-        "instansiPenerbit", "tanggalTerbitSertifikat", "masaBerlakuSertifikat",
-        "cakupanKompetensi", "berkasSertifikat", "dibuatOleh"
+        nama, "namaPerusahaan", "idKaryawan", jabatan, departemen, kompetensi, "noSertifikat",
+        "instansiPenerbit", "tanggalTerbitSertifikat", "masaBerlakuSertifikat", "berkasSertifikat", "dibuatOleh"
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
       [
-        nama, idKaryawan, jabatan, departemen || "", kompetensi, noSertifikat,
+        nama, namaPerusahaan || "", idKaryawan, jabatan, departemen || "", kompetensi, noSertifikat,
         instansiPenerbit || "", tanggalTerbitSertifikat || null, masaBerlakuSertifikat || null,
-        cakupanKompetensi || "", berkasSertifikat || null, req.user.nama
+        berkasSertifikat || null, req.user.nama
       ]
     )
     res.json(rows[0])
@@ -651,6 +676,98 @@ app.delete('/api/tenaga-teknik/:id', verifikasiToken, async (req, res) => {
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: "Gagal menghapus tenaga teknik: " + err.message })
+  }
+})
+
+// ===== EVALUASI LAPORAN HASIL KAJIAN TEKNIS (Aspek 5, 4.4.5) =====
+
+app.get('/api/pengaturan-evaluasi-kajian', verifikasiToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM pengaturan_evaluasi_kajian WHERE id = 1')
+    if (rows.length === 0) {
+      const { rows: rowsBaru } = await pool.query(
+        `INSERT INTO pengaturan_evaluasi_kajian (id, "prosedurEvaluasiKajianTeknis")
+         VALUES (1, false) RETURNING *`
+      )
+      return res.json(rowsBaru[0])
+    }
+    res.json(rows[0])
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal mengambil pengaturan evaluasi kajian: " + err.message })
+  }
+})
+
+app.put('/api/pengaturan-evaluasi-kajian', verifikasiToken, async (req, res) => {
+  const { prosedurEvaluasiKajianTeknis } = req.body
+
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO pengaturan_evaluasi_kajian (id, "prosedurEvaluasiKajianTeknis", "diubahOleh", "diubahPada")
+       VALUES (1, $1, $2, NOW())
+       ON CONFLICT (id) DO UPDATE SET
+         "prosedurEvaluasiKajianTeknis" = $1,
+         "diubahOleh" = $2,
+         "diubahPada" = NOW()
+       RETURNING *`,
+      [!!prosedurEvaluasiKajianTeknis, req.user.nama]
+    )
+    res.json(rows[0])
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal menyimpan pengaturan evaluasi kajian: " + err.message })
+  }
+})
+
+app.get('/api/kajian-teknis', verifikasiToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM kajian_teknis ORDER BY id DESC')
+    res.json(rows)
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal mengambil data kajian teknis: " + err.message })
+  }
+})
+
+app.post('/api/kajian-teknis', verifikasiToken, async (req, res) => {
+  const {
+    judulKajian, jenisKajian, keteranganPerubahan, penyusun, tanggalKajian,
+    fileLaporan, statusKememadaian, disampaikanKeKait, tanggalPenyampaian,
+    namaPenerima, catatanEvaluasi
+  } = req.body
+
+  if (!judulKajian || !jenisKajian || !tanggalKajian) {
+    return res.status(400).json({ error: "Judul Kajian, Jenis Kajian, dan Tanggal Kajian wajib diisi." })
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO kajian_teknis (
+        "judulKajian", "jenisKajian", "keteranganPerubahan", penyusun, "tanggalKajian",
+        "fileLaporan", "statusKememadaian", "disampaikanKeKait", "tanggalPenyampaian",
+        "namaPenerima", "catatanEvaluasi", "dibuatOleh"
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [
+        judulKajian, jenisKajian, keteranganPerubahan || "", penyusun || "", tanggalKajian,
+        fileLaporan || null, statusKememadaian || "Belum Direview", !!disampaikanKeKait,
+        tanggalPenyampaian || null, namaPenerima || "", catatanEvaluasi || "", req.user.nama
+      ]
+    )
+    res.json(rows[0])
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal menyimpan kajian teknis: " + err.message })
+  }
+})
+
+app.delete('/api/kajian-teknis/:id', verifikasiToken, async (req, res) => {
+  const id = Number(req.params.id)
+  try {
+    await pool.query('DELETE FROM kajian_teknis WHERE id = $1', [id])
+    res.json({ message: "Berhasil dihapus" })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal menghapus kajian teknis: " + err.message })
   }
 })
 
