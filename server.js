@@ -68,6 +68,8 @@ async function setupDatabase() {
       "tanggalUjiTerakhir" TEXT,
       "jangkaWaktuBulan" INTEGER,
       "statusKelayakan" TEXT,
+      "namaPetugas" TEXT,
+      "statusKompetensi" TEXT,
       temuan TEXT,
       "tindakLanjut" TEXT,
       foto TEXT,
@@ -76,6 +78,12 @@ async function setupDatabase() {
       "dibuatOleh" TEXT
     )
   `)
+
+  // Migrasi kolom baru untuk database yang tabel "unit"-nya sudah dibuat sebelum
+  // fitur Nama Petugas & Status Kompetensi ada. CREATE TABLE IF NOT EXISTS di atas
+  // tidak akan menambah kolom ke tabel yang sudah ada, jadi ditambahkan manual di sini.
+  await pool.query(`ALTER TABLE unit ADD COLUMN IF NOT EXISTS "namaPetugas" TEXT`)
+  await pool.query(`ALTER TABLE unit ADD COLUMN IF NOT EXISTS "statusKompetensi" TEXT`)
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS riwayat_status (
@@ -101,9 +109,9 @@ async function setupDatabase() {
     )
   `)
 
-  // ===== Aspek 1 — Pemeliharaan/Perawatan =====
-  // Tabel riwayat pemeliharaan per unit. "jadwalBerikutnya" diinput manual saat mencatat
-  // pemeliharaan (BUKAN interval seragam) — sesuai keputusan: tiap unit beda-beda jadwalnya.
+  // Tabel BARU untuk fitur Pemeliharaan (Aspek 1). Satu unit bisa punya banyak baris
+  // riwayat pemeliharaan — "jadwalBerikutnya" bersifat opsional (boleh NULL kalau
+  // belum tahu kapan pemeliharaan berikutnya).
   await pool.query(`
     CREATE TABLE IF NOT EXISTS pemeliharaan (
       id SERIAL PRIMARY KEY,
@@ -383,17 +391,11 @@ app.put('/api/pengaturan-perusahaan', verifikasiToken, async (req, res) => {
   }
 })
 
-// ===== ASPEK 1 — PEMELIHARAAN / PERAWATAN =====
-// Jadwal pemeliharaan berikutnya diinput MANUAL per unit saat mencatat pemeliharaan
-// (bukan interval seragam), sesuai kesepakatan.
+// ===== PEMELIHARAAN (Aspek 1 — Sistem & Pelaksanaan Pemeliharaan SPIP) =====
 
 app.get('/api/pemeliharaan', verifikasiToken, async (req, res) => {
-  const { unitId } = req.query
   try {
-    const query = unitId
-      ? 'SELECT * FROM pemeliharaan WHERE "unitId" = $1 ORDER BY "tanggalPelaksanaan" DESC'
-      : 'SELECT * FROM pemeliharaan ORDER BY "tanggalPelaksanaan" DESC'
-    const { rows } = await pool.query(query, unitId ? [Number(unitId)] : [])
+    const { rows } = await pool.query('SELECT * FROM pemeliharaan ORDER BY id DESC')
     res.json(rows)
   } catch (err) {
     console.error(err)
@@ -407,7 +409,7 @@ app.post('/api/pemeliharaan', verifikasiToken, async (req, res) => {
     tanggalPelaksanaan, deskripsi, petugas, jadwalBerikutnya
   } = req.body
 
-  if (!unitId || !jenisPemeliharaan || !tanggalPelaksanaan) {
+  if (!unitId || !namaUnit || !nomorUnit || !jenisPemeliharaan || !tanggalPelaksanaan) {
     return res.status(400).json({ error: "Unit, Jenis Pemeliharaan, dan Tanggal Pelaksanaan wajib diisi." })
   }
 
@@ -422,7 +424,7 @@ app.post('/api/pemeliharaan', verifikasiToken, async (req, res) => {
     res.json(rows[0])
   } catch (err) {
     console.error(err)
-    res.status(500).json({ error: "Gagal menambah data pemeliharaan: " + err.message })
+    res.status(500).json({ error: "Gagal menyimpan pemeliharaan: " + err.message })
   }
 })
 
@@ -433,7 +435,7 @@ app.delete('/api/pemeliharaan/:id', verifikasiToken, async (req, res) => {
     res.json({ message: "Berhasil dihapus" })
   } catch (err) {
     console.error(err)
-    res.status(500).json({ error: "Gagal menghapus: " + err.message })
+    res.status(500).json({ error: "Gagal menghapus pemeliharaan: " + err.message })
   }
 })
 
@@ -516,6 +518,12 @@ app.post('/api/login', async (req, res) => {
 
 // ===== UNIT SPIP (semua endpoint di bawah ini wajib login) =====
 
+// GET /api/unit — sekarang mendukung filter, pagination, dan mode "semua" (untuk export Excel)
+// Query params yang didukung:
+//   halaman, batas         -> untuk pagination (diabaikan kalau semua=true)
+//   perusahaan, namaUnit, nomorUnit  -> pencarian teks (ILIKE, contains)
+//   jenisSpip, jenisAlat, statusKelayakan, statusWaktu -> exact match ("Semua" = tanpa filter)
+//   semua=true              -> kembalikan SEMUA baris yang cocok filter, tanpa LIMIT/OFFSET (dipakai saat export Excel)
 app.get('/api/unit', verifikasiToken, async (req, res) => {
   try {
     const {
@@ -557,6 +565,8 @@ app.get('/api/unit', verifikasiToken, async (req, res) => {
       kondisi.push(`"statusKelayakan" = $${idx++}`)
       nilai.push(statusKelayakan)
     }
+    // statusWaktu dihitung dari jatuh_tempo (kolom turunan di subquery di bawah),
+    // meniru logika hitungStatusWaktu() di src/utils/spipHelpers.js
     if (statusWaktu === "Sudah Lewat") {
       kondisi.push(`jatuh_tempo < NOW()`)
     } else if (statusWaktu === "Mendekati Jatuh Tempo") {
@@ -576,12 +586,14 @@ app.get('/api/unit', verifikasiToken, async (req, res) => {
       ${whereClause}
     `
 
+    // Mode export: kembalikan semua baris yang cocok filter, tanpa pagination
     if (semua === "true") {
       const queryData = `SELECT * ${queryDasar} ORDER BY id DESC`
       const { rows } = await pool.query(queryData, nilai)
       return res.json({ data: rows, totalData: rows.length })
     }
 
+    // Mode normal: pagination di database
     const halaman = Math.max(1, Number(req.query.halaman) || 1)
     const batas = Math.max(1, Number(req.query.batas) || 10)
     const offset = (halaman - 1) * batas
@@ -608,20 +620,20 @@ app.get('/api/unit', verifikasiToken, async (req, res) => {
 app.post('/api/unit', verifikasiToken, async (req, res) => {
   const {
     namaPerusahaan, jenisSpip, namaUnit, jenisAlat, nomorUnit,
-    tanggalUjiTerakhir, jangkaWaktuBulan, statusKelayakan, temuan, tindakLanjut, foto,
-    pdfNama, pdfData, dibuatOleh
+    tanggalUjiTerakhir, jangkaWaktuBulan, statusKelayakan, namaPetugas, statusKompetensi,
+    temuan, tindakLanjut, foto, pdfNama, pdfData, dibuatOleh
   } = req.body
 
   try {
     const { rows } = await pool.query(
       `INSERT INTO unit (
         "namaPerusahaan", "jenisSpip", "namaUnit", "jenisAlat", "nomorUnit",
-        "tanggalUjiTerakhir", "jangkaWaktuBulan", "statusKelayakan", temuan, "tindakLanjut", foto,
-        "pdfNama", "pdfData", "dibuatOleh"
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+        "tanggalUjiTerakhir", "jangkaWaktuBulan", "statusKelayakan", "namaPetugas", "statusKompetensi",
+        temuan, "tindakLanjut", foto, "pdfNama", "pdfData", "dibuatOleh"
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
       [namaPerusahaan, jenisSpip, namaUnit, jenisAlat, nomorUnit,
-        tanggalUjiTerakhir, jangkaWaktuBulan, statusKelayakan, temuan, tindakLanjut, foto,
-        pdfNama, pdfData, dibuatOleh]
+        tanggalUjiTerakhir, jangkaWaktuBulan, statusKelayakan, namaPetugas, statusKompetensi,
+        temuan, tindakLanjut, foto, pdfNama, pdfData, dibuatOleh]
     )
     res.json(rows[0])
   } catch (err) {
@@ -690,17 +702,19 @@ app.post('/api/unit/import', verifikasiToken, async (req, res) => {
   })
 })
 
+// PUT /api/unit/:id — sekarang juga menerima namaPetugas & statusKompetensi supaya bisa
+// di-follow-up langsung dari tabel Data SPIP tanpa harus input ulang unit dari awal.
 app.put('/api/unit/:id', verifikasiToken, async (req, res) => {
   const id = Number(req.params.id)
-  const { statusKelayakan, tindakLanjut } = req.body
+  const { statusKelayakan, tindakLanjut, namaPetugas, statusKompetensi } = req.body
 
   try {
     const { rows: rowsLama } = await pool.query('SELECT * FROM unit WHERE id = $1', [id])
     const unitLama = rowsLama[0]
 
     const { rows } = await pool.query(
-      'UPDATE unit SET "statusKelayakan" = $1, "tindakLanjut" = $2 WHERE id = $3 RETURNING *',
-      [statusKelayakan, tindakLanjut, id]
+      'UPDATE unit SET "statusKelayakan" = $1, "tindakLanjut" = $2, "namaPetugas" = $3, "statusKompetensi" = $4 WHERE id = $5 RETURNING *',
+      [statusKelayakan, tindakLanjut, namaPetugas, statusKompetensi, id]
     )
 
     if (unitLama && unitLama.statusKelayakan !== statusKelayakan) {
