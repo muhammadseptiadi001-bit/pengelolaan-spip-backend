@@ -109,9 +109,8 @@ async function setupDatabase() {
     )
   `)
 
-  // Tabel BARU untuk fitur Pemeliharaan (Aspek 1). Satu unit bisa punya banyak baris
-  // riwayat pemeliharaan — "jadwalBerikutnya" bersifat opsional (boleh NULL kalau
-  // belum tahu kapan pemeliharaan berikutnya).
+  // Tabel Pemeliharaan (Aspek 1). Satu unit bisa punya banyak baris riwayat
+  // pemeliharaan — "jadwalBerikutnya" bersifat opsional (boleh NULL).
   await pool.query(`
     CREATE TABLE IF NOT EXISTS pemeliharaan (
       id SERIAL PRIMARY KEY,
@@ -128,12 +127,7 @@ async function setupDatabase() {
     )
   `)
 
-  // ===== TABEL BARU untuk Aspek 2 — Pengamanan Instalasi (4.4.2) =====
-  // Tabel terpisah dari "pengaturan_perusahaan" (bukan nambah kolom ke situ), supaya
-  // endpoint /api/pengaturan-perusahaan yang sudah dipakai halaman Evaluasi tidak
-  // ikut berubah bentuk. Poin 2-7 dari kriteria Kepmen 4.4.2 (identifikasi kebutuhan
-  // pengaman, prosedur pengamanan, desain, prosedur pemasangan, prosedur pemeliharaan
-  // pengamanan, program & jadwal pemeriksaan) masing-masing jadi satu kolom boolean.
+  // ===== Aspek 2 — Pengamanan Instalasi (4.4.2) =====
   await pool.query(`
     CREATE TABLE IF NOT EXISTS pengaturan_pengamanan_instalasi (
       id INTEGER PRIMARY KEY DEFAULT 1,
@@ -149,10 +143,6 @@ async function setupDatabase() {
     )
   `)
 
-  // Poin 8 dari kriteria 4.4.2 ("menerapkan, melaksanakan pemeriksaan berkala, memantau,
-  // dan mengevaluasi sistem pengamanan instalasi oleh Tenaga Teknis Berkompeten") — sifatnya
-  // per-instalasi, satu instalasi bisa punya banyak riwayat pemeriksaan. Polanya sama
-  // persis dengan tabel "pemeliharaan" di atas.
   await pool.query(`
     CREATE TABLE IF NOT EXISTS pemeriksaan_instalasi (
       id SERIAL PRIMARY KEY,
@@ -165,6 +155,30 @@ async function setupDatabase() {
       petugas TEXT,
       "statusKompetensi" TEXT,
       "jadwalBerikutnya" TEXT,
+      "dibuatOleh" TEXT,
+      "dibuatPada" TIMESTAMP DEFAULT NOW()
+    )
+  `)
+
+  // ===== TABEL BARU — Aspek 4: Kompetensi Tenaga Teknik (4.4.4) =====
+  // Datanya BERDIRI SENDIRI, tidak berasal dari Input SPIP — mencatat seluruh tenaga
+  // teknik perusahaan beserta sertifikasi kompetensinya. "masaBerlakuSertifikat" adalah
+  // tanggal kedaluwarsa langsung (bukan durasi), status Aktif/Akan Kedaluwarsa/Kedaluwarsa
+  // dihitung di frontend dari tanggal ini (pola sama seperti "jadwalBerikutnya" di Pemeliharaan).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tenaga_teknik (
+      id SERIAL PRIMARY KEY,
+      nama TEXT,
+      "idKaryawan" TEXT,
+      jabatan TEXT,
+      departemen TEXT,
+      kompetensi TEXT,
+      "noSertifikat" TEXT,
+      "instansiPenerbit" TEXT,
+      "tanggalTerbitSertifikat" TEXT,
+      "masaBerlakuSertifikat" TEXT,
+      "cakupanKompetensi" TEXT,
+      "berkasSertifikat" TEXT,
       "dibuatOleh" TEXT,
       "dibuatPada" TIMESTAMP DEFAULT NOW()
     )
@@ -583,6 +597,60 @@ app.delete('/api/pemeliharaan/:id', verifikasiToken, async (req, res) => {
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: "Gagal menghapus pemeliharaan: " + err.message })
+  }
+})
+
+// ===== TENAGA TEKNIK (Aspek 4 — Kompetensi Tenaga Teknik, 4.4.4) =====
+
+app.get('/api/tenaga-teknik', verifikasiToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM tenaga_teknik ORDER BY id DESC')
+    res.json(rows)
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal mengambil data tenaga teknik: " + err.message })
+  }
+})
+
+app.post('/api/tenaga-teknik', verifikasiToken, async (req, res) => {
+  const {
+    nama, idKaryawan, jabatan, departemen, kompetensi, noSertifikat,
+    instansiPenerbit, tanggalTerbitSertifikat, masaBerlakuSertifikat,
+    cakupanKompetensi, berkasSertifikat
+  } = req.body
+
+  if (!nama || !idKaryawan || !jabatan || !kompetensi || !noSertifikat) {
+    return res.status(400).json({ error: "Nama, ID Karyawan, Jabatan, Kompetensi, dan No Sertifikat wajib diisi." })
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO tenaga_teknik (
+        nama, "idKaryawan", jabatan, departemen, kompetensi, "noSertifikat",
+        "instansiPenerbit", "tanggalTerbitSertifikat", "masaBerlakuSertifikat",
+        "cakupanKompetensi", "berkasSertifikat", "dibuatOleh"
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [
+        nama, idKaryawan, jabatan, departemen || "", kompetensi, noSertifikat,
+        instansiPenerbit || "", tanggalTerbitSertifikat || null, masaBerlakuSertifikat || null,
+        cakupanKompetensi || "", berkasSertifikat || null, req.user.nama
+      ]
+    )
+    res.json(rows[0])
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal menyimpan tenaga teknik: " + err.message })
+  }
+})
+
+app.delete('/api/tenaga-teknik/:id', verifikasiToken, async (req, res) => {
+  const id = Number(req.params.id)
+  try {
+    await pool.query('DELETE FROM tenaga_teknik WHERE id = $1', [id])
+    res.json({ message: "Berhasil dihapus" })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal menghapus tenaga teknik: " + err.message })
   }
 })
 
