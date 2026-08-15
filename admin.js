@@ -8,17 +8,42 @@
 async function buatAdminRouter() {
   const { default: AdminJS } = await import('adminjs')
   const { default: AdminJSExpress } = await import('@adminjs/express')
-  const { Database, Resource } = await import('@adminjs/sql')
+  const sqlModule = await import('@adminjs/sql')
+
+  // DIAGNOSTIK SEMENTARA: cetak bentuk asli module @adminjs/sql supaya kita tahu persis
+  // nama export yang benar (Database bisa saja ada di sqlModule.default.Database, bukan
+  // langsung di sqlModule.Database, tergantung cara package ini di-build).
+  console.log("DEBUG @adminjs/sql module keys:", Object.keys(sqlModule))
+  if (sqlModule.default) {
+    console.log("DEBUG @adminjs/sql default keys:", Object.keys(sqlModule.default))
+  }
+
+  // Coba ambil Database & Resource dari kedua kemungkinan lokasi (named export ATAU
+  // dibungkus di dalam .default), supaya tetap jalan apa pun bentuk exportnya.
+  const Database = sqlModule.Database || sqlModule.default?.Database
+  const Resource = sqlModule.Resource || sqlModule.default?.Resource
+
+  console.log("DEBUG typeof Database:", typeof Database)
+  console.log("DEBUG Database.prototype keys:", Database ? Object.getOwnPropertyNames(Database.prototype || {}) : "Database undefined")
+
+  if (typeof Database !== 'function') {
+    throw new Error(`Database bukan constructor yang valid (typeof: ${typeof Database}). Cek log DEBUG di atas untuk bentuk export @adminjs/sql yang sebenarnya.`)
+  }
 
   AdminJS.registerAdapter({ Database, Resource })
 
-  // Bikin router AdminJS yang terhubung ke database Postgres yang sama dengan backend utama.
-  // Semua tabel yang ada (unit, users, pemeliharaan, tenaga_teknik, dst) otomatis kebaca
-  // tanpa perlu didaftarkan satu-satu.
-  const db = await new Database(
+  // Bikin instance Database. Dipisah dari .init() supaya kalau .init() memang tidak ada,
+  // errornya lebih jelas menyebutkan bagian mana yang gagal.
+  const dbInstance = new Database(
     { connectionString: process.env.DATABASE_URL, database: 'railway' },
     'postgresql'
-  ).init()
+  )
+
+  console.log("DEBUG typeof dbInstance.init:", typeof dbInstance.init)
+
+  const db = typeof dbInstance.init === 'function'
+    ? await dbInstance.init()
+    : dbInstance // fallback: kalau versi ini tidak butuh .init(), instance-nya langsung dipakai
 
   const admin = new AdminJS({
     resources: db.tables().map((table) => ({ resource: table, options: {} })),
