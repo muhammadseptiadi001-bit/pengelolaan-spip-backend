@@ -10,6 +10,7 @@ const cron = require('node-cron')
 const multer = require('multer')
 const streamifier = require('streamifier')
 const cloudinary = require('cloudinary').v2
+const { buatAdminRouter } = require('./admin') // Panel admin AdminJS
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -176,10 +177,7 @@ async function setupDatabase() {
 
   await pool.query(`ALTER TABLE tenaga_teknik ADD COLUMN IF NOT EXISTS "namaPerusahaan" TEXT`)
 
-  // ===== TABEL BARU — Aspek 5: Evaluasi Laporan Hasil Kajian Teknis (4.4.5) =====
-  // Poin 1 dari kriteria regulasi (prosedur evaluasi kajian teknis sudah disusun &
-  // ditetapkan) bersifat tingkat perusahaan — pola sama seperti pengaturan_perusahaan
-  // dan pengaturan_pengamanan_instalasi (satu baris, id selalu 1).
+  // ===== Aspek 5: Evaluasi Laporan Hasil Kajian Teknis (4.4.5) =====
   await pool.query(`
     CREATE TABLE IF NOT EXISTS pengaturan_evaluasi_kajian (
       id INTEGER PRIMARY KEY DEFAULT 1,
@@ -190,8 +188,6 @@ async function setupDatabase() {
     )
   `)
 
-  // Poin 2-4 dari kriteria regulasi bersifat per dokumen kajian teknis — satu baris per
-  // laporan kajian yang dibuat perusahaan.
   await pool.query(`
     CREATE TABLE IF NOT EXISTS kajian_teknis (
       id SERIAL PRIMARY KEY,
@@ -214,6 +210,21 @@ async function setupDatabase() {
   console.log("Database siap.")
 }
 setupDatabase()
+
+// ===== ADMIN PANEL (AdminJS) =====
+// Dipasang terpisah dari setupDatabase() karena butuh koneksi & inisialisasi sendiri
+// (membaca struktur tabel yang sudah dibuat). Kalau gagal terpasang (misal env var
+// belum diisi), server utama tetap jalan normal — cuma /admin yang tidak aktif.
+async function pasangAdminPanel() {
+  try {
+    const { admin, router } = await buatAdminRouter()
+    app.use(admin.options.rootPath, router)
+    console.log(`Admin panel siap di ${admin.options.rootPath}`)
+  } catch (err) {
+    console.error("Gagal memasang admin panel:", err.message)
+  }
+}
+pasangAdminPanel()
 
 // ===== MIDDLEWARE AUTENTIKASI =====
 
@@ -433,7 +444,7 @@ app.get('/api/riwayat/unit/:id', verifikasiToken, async (req, res) => {
   }
 })
 
-// ===== PENGATURAN TINGKAT PERUSAHAAN (checklist kepatuhan di halaman Evaluasi) =====
+// ===== PENGATURAN TINGKAT PERUSAHAAN =====
 
 app.get('/api/pengaturan-perusahaan', verifikasiToken, async (req, res) => {
   try {
@@ -771,7 +782,7 @@ app.delete('/api/kajian-teknis/:id', verifikasiToken, async (req, res) => {
   }
 })
 
-// ===== UPLOAD FILE KE CLOUDINARY (BARU) =====
+// ===== UPLOAD FILE KE CLOUDINARY =====
 
 app.post('/api/upload', verifikasiToken, upload.single('file'), async (req, res) => {
   if (!req.file) {
