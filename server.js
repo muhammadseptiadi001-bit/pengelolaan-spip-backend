@@ -177,6 +177,20 @@ async function setupDatabase() {
 
   await pool.query(`ALTER TABLE tenaga_teknik ADD COLUMN IF NOT EXISTS "namaPerusahaan" TEXT`)
 
+  // ===== AUDIT LOG (poin 6) — jejak siapa-kapan-apa yang diubah lewat panel admin =====
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id SERIAL PRIMARY KEY,
+      tabel TEXT,
+      "recordId" TEXT,
+      aksi TEXT,
+      "dataSebelum" JSONB,
+      "dataSesudah" JSONB,
+      "dilakukanOleh" TEXT,
+      "dilakukanPada" TIMESTAMP DEFAULT NOW()
+    )
+  `)
+
   // ===== Aspek 5: Evaluasi Laporan Hasil Kajian Teknis (4.4.5) =====
   await pool.query(`
     CREATE TABLE IF NOT EXISTS pengaturan_evaluasi_kajian (
