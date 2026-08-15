@@ -8,22 +8,24 @@
 async function buatAdminRouter() {
   const { default: AdminJS } = await import('adminjs')
   const { default: AdminJSExpress } = await import('@adminjs/express')
-  const { Database, Resource } = await import('@adminjs/sql')
+  // PENTING: class yang harus di-instansiasi & dipanggil .init() adalah "Adapter"
+  // (default export dari @adminjs/sql), BUKAN "Database". "Database" dan "Resource"
+  // di sini cuma dipakai untuk AdminJS.registerAdapter — mereka adalah class internal
+  // yang dipakai Adapter di belakang layar, bukan untuk dipanggil manual.
+  const { default: Adapter, Database, Resource } = await import('@adminjs/sql')
 
   AdminJS.registerAdapter({ Database, Resource })
 
-  // PENTING: versi @adminjs/sql yang dipakai di project ini TIDAK punya method .init()
-  // atau .tables() seperti di beberapa contoh dokumentasi lama — yang benar dipanggil
-  // adalah .resources(), yang langsung mengembalikan resource siap pakai (bukan tabel
-  // mentah yang masih perlu dibungkus). Jangan diganti balik ke .init()/.tables().
-  const dbInstance = new Database(
-    { connectionString: process.env.DATABASE_URL, database: 'railway' },
-    'postgresql'
-  )
-  const resources = await dbInstance.resources()
+  const db = await new Adapter('postgresql', {
+    connectionString: process.env.DATABASE_URL,
+    database: 'railway',
+  }).init()
 
   const admin = new AdminJS({
-    resources: resources.map((resource) => ({ resource, options: {} })),
+    // "databases: [db]" otomatis mendaftarkan SEMUA tabel yang ada di database ini
+    // sekaligus (unit, users, pemeliharaan, tenaga_teknik, dst) tanpa perlu didaftarkan
+    // satu-satu lewat db.table('nama_tabel').
+    databases: [db],
     rootPath: '/admin',
     branding: {
       companyName: 'Pengelolaan SPIP - SICOOL',
