@@ -5,6 +5,7 @@
 // itu sebabnya sebelumnya seluruh server crash total, bahkan sebelum sempat masuk ke
 // try/catch di pasangAdminPanel() pada server.js.
 
+const path = require('path')
 const { Pool } = require('pg')
 
 // Daftar tabel yang didaftarkan manual satu-satu (bukan pakai "databases: [db]" auto-register
@@ -38,18 +39,22 @@ async function buatAdminRouter() {
 
   AdminJS.registerAdapter({ Database, Resource })
 
-  // ComponentLoader wajib ada supaya AdminJS bisa mem-bundle komponen React yang
-  // dipakai oleh fitur Import/Export (tombol, form upload file, dsb).
+  // ComponentLoader wajib ada supaya AdminJS bisa mem-bundle komponen React custom —
+  // dipakai untuk fitur Import/Export dan juga untuk Dashboard ringkasan di bawah.
   const componentLoader = new ComponentLoader()
+  const Components = {
+    Dashboard: componentLoader.add('Dashboard', path.join(__dirname, 'admin-components', 'Dashboard')),
+  }
 
   const db = await new Adapter('postgresql', {
     connectionString: process.env.DATABASE_URL,
     database: 'railway',
   }).init()
 
-  // Pool koneksi TERPISAH khusus untuk menulis ke tabel audit_log dari dalam hook —
-  // dibuat sendiri (bukan pinjam dari server.js) supaya admin.js tetap mandiri/tidak
-  // perlu server.js mengoper pool sebagai parameter.
+  // Pool koneksi TERPISAH khusus untuk menulis ke tabel audit_log dari dalam hook, dan
+  // juga dipakai untuk query ringkasan Dashboard — dibuat sendiri (bukan pinjam dari
+  // server.js) supaya admin.js tetap mandiri/tidak perlu server.js mengoper pool sebagai
+  // parameter.
   const poolAudit = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false },
@@ -165,10 +170,61 @@ async function buatAdminRouter() {
     },
   }
 
+  // ===== DASHBOARD RINGKASAN (poin 4) =====
+  // Handler ini dijalankan di server, hasilnya diambil otomatis oleh komponen
+  // Dashboard.jsx lewat ApiClient().getDashboard() di sisi frontend.
+  async function dashboardHandler() {
+    const { rows: totalUnit } = await poolAudit.query('SELECT COUNT(*)::int AS total FROM unit')
+    const { rows: totalTenagaTeknik } = await poolAudit.query('SELECT COUNT(*)::int AS total FROM tenaga_teknik')
+    const { rows: totalPemeliharaan } = await poolAudit.query('SELECT COUNT(*)::int AS total FROM pemeliharaan')
+    const { rows: totalPemeriksaanInstalasi } = await poolAudit.query('SELECT COUNT(*)::int AS total FROM pemeriksaan_instalasi')
+    const { rows: totalKajianTeknis } = await poolAudit.query('SELECT COUNT(*)::int AS total FROM kajian_teknis')
+    const { rows: totalUsers } = await poolAudit.query('SELECT COUNT(*)::int AS total FROM users')
+
+    const { rows: statusKelayakan } = await poolAudit.query(`
+      SELECT COALESCE("statusKelayakan", 'Belum diisi') AS label, COUNT(*)::int AS jumlah
+      FROM unit
+      GROUP BY label
+      ORDER BY jumlah DESC
+    `)
+
+    const { rows: statusWaktu } = await poolAudit.query(`
+      SELECT
+        CASE
+          WHEN jatuh_tempo < NOW() THEN 'Sudah Lewat'
+          WHEN jatuh_tempo <= NOW() + INTERVAL '30 days' THEN 'Mendekati Jatuh Tempo'
+          ELSE 'Aman'
+        END AS label,
+        COUNT(*)::int AS jumlah
+      FROM (
+        SELECT "tanggalUjiTerakhir"::timestamp + ("jangkaWaktuBulan" * INTERVAL '1 month') AS jatuh_tempo
+        FROM unit
+      ) unit_dengan_tempo
+      GROUP BY label
+    `)
+
+    return {
+      ringkasan: {
+        unit: totalUnit[0].total,
+        tenagaTeknik: totalTenagaTeknik[0].total,
+        pemeliharaan: totalPemeliharaan[0].total,
+        pemeriksaanInstalasi: totalPemeriksaanInstalasi[0].total,
+        kajianTeknis: totalKajianTeknis[0].total,
+        users: totalUsers[0].total,
+      },
+      statusKelayakan,
+      statusWaktu,
+    }
+  }
+
   const admin = new AdminJS({
     resources: [...resourceDenganAudit, resourceAuditLog],
     rootPath: '/admin',
     componentLoader,
+    dashboard: {
+      handler: dashboardHandler,
+      component: Components.Dashboard,
+    },
     branding: {
       companyName: 'Pengelolaan SPIP - SICOOL',
     },
