@@ -10,7 +10,8 @@ const { Pool } = require('pg')
 // Daftar tabel yang didaftarkan manual satu-satu (bukan pakai "databases: [db]" auto-register
 // lagi), supaya tiap tabel bisa dikasih hook audit log sendiri-sendiri. Kalau nanti nambah
 // tabel baru di server.js, tambahkan juga nama tabelnya di sini supaya ikut muncul di panel
-// admin dan (kalau relevan) ikut tercatat di audit log.
+// admin dan (kalau relevan) ikut tercatat di audit log. Tabel-tabel ini juga otomatis dapat
+// tombol Import/Export (lihat resourceDenganAudit di bawah).
 const DAFTAR_TABEL_DIAUDIT = [
   'users',
   'unit',
@@ -25,15 +26,21 @@ const DAFTAR_TABEL_DIAUDIT = [
 ]
 
 async function buatAdminRouter() {
-  const { default: AdminJS } = await import('adminjs')
+  const { default: AdminJS, ComponentLoader } = await import('adminjs')
   const { default: AdminJSExpress } = await import('@adminjs/express')
   // PENTING: class yang harus di-instansiasi & dipanggil .init() adalah "Adapter"
   // (default export dari @adminjs/sql), BUKAN "Database". "Database" dan "Resource"
   // di sini cuma dipakai untuk AdminJS.registerAdapter — mereka adalah class internal
   // yang dipakai Adapter di belakang layar, bukan untuk dipanggil manual.
   const { default: Adapter, Database, Resource } = await import('@adminjs/sql')
+  // Plugin resmi untuk tombol Import/Export per tabel di panel admin.
+  const { default: importExportFeature } = await import('@adminjs/import-export')
 
   AdminJS.registerAdapter({ Database, Resource })
+
+  // ComponentLoader wajib ada supaya AdminJS bisa mem-bundle komponen React yang
+  // dipakai oleh fitur Import/Export (tombol, form upload file, dsb).
+  const componentLoader = new ComponentLoader()
 
   const db = await new Adapter('postgresql', {
     connectionString: process.env.DATABASE_URL,
@@ -133,17 +140,19 @@ async function buatAdminRouter() {
     }
   }
 
-  // Tabel-tabel biasa: didaftarkan manual + dikasih hook audit.
+  // Tabel-tabel biasa: didaftarkan manual + dikasih hook audit + fitur Import/Export.
   const resourceDenganAudit = DAFTAR_TABEL_DIAUDIT.map((namaTabel) => ({
     resource: db.table(namaTabel),
     options: {
       actions: buatHookAudit(namaTabel),
     },
+    features: [importExportFeature({ componentLoader })],
   }))
 
   // Tabel audit_log itu sendiri: didaftarkan juga supaya bisa DILIHAT di panel admin,
   // tapi dibuat READ-ONLY (tidak bisa tambah/ubah/hapus manual) — supaya jejaknya tidak
-  // bisa "dihapus jejak"-nya sendiri lewat panel yang sama.
+  // bisa "dihapus jejak"-nya sendiri lewat panel yang sama. Sengaja TIDAK dikasih fitur
+  // Import/Export supaya sifat read-only-nya tetap konsisten (tidak bisa disusupi lewat import).
   const resourceAuditLog = {
     resource: db.table('audit_log'),
     options: {
@@ -159,6 +168,7 @@ async function buatAdminRouter() {
   const admin = new AdminJS({
     resources: [...resourceDenganAudit, resourceAuditLog],
     rootPath: '/admin',
+    componentLoader,
     branding: {
       companyName: 'Pengelolaan SPIP - SICOOL',
     },

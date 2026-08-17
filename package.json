@@ -11,7 +11,9 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@adminjs/design-system": "^4.1.1",
     "@adminjs/express": "^6.1.1",
+    "@adminjs/import-export": "^3.0.0",
     "@adminjs/sql": "^2.2.6",
     "adminjs": "^7.8.17",
     "bcryptjs": "^3.0.3",
