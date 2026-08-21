@@ -58,6 +58,8 @@ async function setupDatabase() {
     )
   `)
 
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "role" TEXT`)
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS unit (
       id SERIAL PRIMARY KEY,
@@ -82,6 +84,9 @@ async function setupDatabase() {
 
   await pool.query(`ALTER TABLE unit ADD COLUMN IF NOT EXISTS "namaPetugas" TEXT`)
   await pool.query(`ALTER TABLE unit ADD COLUMN IF NOT EXISTS "statusKompetensi" TEXT`)
+  await pool.query(`ALTER TABLE unit ADD COLUMN IF NOT EXISTS "statusPersetujuan" TEXT DEFAULT 'Diajukan'`)
+  await pool.query(`ALTER TABLE unit ADD COLUMN IF NOT EXISTS "catatanPenolakan" TEXT`)
+  await pool.query(`ALTER TABLE unit ADD COLUMN IF NOT EXISTS "ditolakOleh" TEXT`)
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS riwayat_status (
@@ -95,6 +100,8 @@ async function setupDatabase() {
       "diubahPada" TIMESTAMP DEFAULT NOW()
     )
   `)
+
+  await pool.query(`ALTER TABLE riwayat_status ADD COLUMN IF NOT EXISTS "jenis" TEXT DEFAULT 'kelayakan'`)
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS pengaturan_perusahaan (
@@ -865,8 +872,15 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).json({ error: "Username atau password salah" })
     }
 
-    const token = jwt.sign({ id: user.id, nama: user.nama, username: user.username }, SECRET_KEY, { expiresIn: "7d" })
-    res.json({ token, user: { id: user.id, nama: user.nama, username: user.username, email: user.email } })
+    const token = jwt.sign(
+      { id: user.id, nama: user.nama, username: user.username, role: user.role || null },
+      SECRET_KEY,
+      { expiresIn: "7d" }
+    )
+    res.json({
+      token,
+      user: { id: user.id, nama: user.nama, username: user.username, email: user.email, role: user.role || null },
+    })
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: "Gagal login: " + err.message })
@@ -964,6 +978,109 @@ app.get('/api/unit', verifikasiToken, async (req, res) => {
   }
 })
 
+// ===== PERSETUJUAN STATUS KELAYAKAN (Diajukan -> Menunggu KTT -> Disetujui Penuh) =====
+
+app.get('/api/unit/persetujuan', verifikasiToken, async (req, res) => {
+  const role = req.user.role
+  let statusTarget = null
+
+  if (role === 'ko') statusTarget = 'Diajukan'
+  else if (role === 'ktt') statusTarget = 'Menunggu KTT'
+  else return res.status(403).json({ error: "Anda tidak memiliki akses untuk melihat daftar persetujuan." })
+
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM unit WHERE "statusPersetujuan" = $1 ORDER BY id DESC',
+      [statusTarget]
+    )
+    res.json(rows)
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal mengambil daftar persetujuan: " + err.message })
+  }
+})
+
+app.put('/api/unit/:id/setujui', verifikasiToken, async (req, res) => {
+  const id = Number(req.params.id)
+  const role = req.user.role
+
+  try {
+    const { rows: rowsUnit } = await pool.query('SELECT * FROM unit WHERE id = $1', [id])
+    const unit = rowsUnit[0]
+    if (!unit) return res.status(404).json({ error: "Unit tidak ditemukan." })
+
+    let statusBaru = null
+    if (role === 'ko' && unit.statusPersetujuan === 'Diajukan') {
+      statusBaru = 'Menunggu KTT'
+    } else if (role === 'ktt' && unit.statusPersetujuan === 'Menunggu KTT') {
+      statusBaru = 'Disetujui Penuh'
+    } else {
+      return res.status(403).json({ error: "Anda tidak memiliki akses untuk menyetujui unit ini pada tahap saat ini." })
+    }
+
+    const { rows } = await pool.query(
+      'UPDATE unit SET "statusPersetujuan" = $1, "catatanPenolakan" = NULL, "ditolakOleh" = NULL WHERE id = $2 RETURNING *',
+      [statusBaru, id]
+    )
+
+    await pool.query(
+      `INSERT INTO riwayat_status ("unitId", "namaUnit", "nomorUnit", "statusLama", "statusBaru", "diubahOleh", jenis)
+       VALUES ($1, $2, $3, $4, $5, $6, 'persetujuan')`,
+      [id, unit.namaUnit, unit.nomorUnit, unit.statusPersetujuan, statusBaru, req.user.nama]
+    )
+
+    res.json(rows[0])
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal menyetujui unit: " + err.message })
+  }
+})
+
+app.put('/api/unit/:id/tolak', verifikasiToken, async (req, res) => {
+  const id = Number(req.params.id)
+  const role = req.user.role
+  const { catatan } = req.body
+
+  try {
+    const { rows: rowsUnit } = await pool.query('SELECT * FROM unit WHERE id = $1', [id])
+    const unit = rowsUnit[0]
+    if (!unit) return res.status(404).json({ error: "Unit tidak ditemukan." })
+
+    let bolehTolak = false
+    let ditolakOlehLabel = ""
+
+    if (role === 'ko' && unit.statusPersetujuan === 'Diajukan') {
+      bolehTolak = true
+      ditolakOlehLabel = "KO"
+    } else if (role === 'ktt' && unit.statusPersetujuan === 'Menunggu KTT') {
+      bolehTolak = true
+      ditolakOlehLabel = "KTT"
+    }
+
+    if (!bolehTolak) {
+      return res.status(403).json({ error: "Anda tidak memiliki akses untuk menolak unit ini pada tahap saat ini." })
+    }
+
+    const statusBaru = 'Diajukan'
+
+    const { rows } = await pool.query(
+      'UPDATE unit SET "statusPersetujuan" = $1, "catatanPenolakan" = $2, "ditolakOleh" = $3 WHERE id = $4 RETURNING *',
+      [statusBaru, catatan || "", ditolakOlehLabel, id]
+    )
+
+    await pool.query(
+      `INSERT INTO riwayat_status ("unitId", "namaUnit", "nomorUnit", "statusLama", "statusBaru", "diubahOleh", jenis)
+       VALUES ($1, $2, $3, $4, $5, $6, 'persetujuan')`,
+      [id, unit.namaUnit, unit.nomorUnit, unit.statusPersetujuan, `Ditolak oleh ${ditolakOlehLabel}`, req.user.nama]
+    )
+
+    res.json(rows[0])
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Gagal menolak unit: " + err.message })
+  }
+})
+
 app.post('/api/unit', verifikasiToken, async (req, res) => {
   const {
     namaPerusahaan, jenisSpip, namaUnit, jenisAlat, nomorUnit,
@@ -976,8 +1093,8 @@ app.post('/api/unit', verifikasiToken, async (req, res) => {
       `INSERT INTO unit (
         "namaPerusahaan", "jenisSpip", "namaUnit", "jenisAlat", "nomorUnit",
         "tanggalUjiTerakhir", "jangkaWaktuBulan", "statusKelayakan", "namaPetugas", "statusKompetensi",
-        temuan, "tindakLanjut", foto, "pdfNama", "pdfData", "dibuatOleh"
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+        temuan, "tindakLanjut", foto, "pdfNama", "pdfData", "dibuatOleh", "statusPersetujuan"
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'Diajukan') RETURNING *`,
       [namaPerusahaan, jenisSpip, namaUnit, jenisAlat, nomorUnit,
         tanggalUjiTerakhir, jangkaWaktuBulan, statusKelayakan, namaPetugas, statusKompetensi,
         temuan, tindakLanjut, foto, pdfNama, pdfData, dibuatOleh]
